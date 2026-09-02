@@ -44,7 +44,7 @@ async function handleMessage(message: Message): Promise<void> {
     if ("sendTyping" in message.channel) {
       await message.channel.sendTyping();
     }
-    const reply = await runTurn(text);
+    const reply = await runTurn({ type: "chat", content: text }, { discordMessageId: message.id });
     for (const chunk of chunkForDiscord(reply)) {
       await message.reply(chunk);
     }

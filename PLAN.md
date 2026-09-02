@@ -3,7 +3,7 @@
 ## Status
 
 - [x] **M1 — Basic Discord echo + single-turn SDK reply.** Done and verified live: bot connects, DMs work, and (extended slightly beyond the original M1 scope) `@mentions` in a shared server channel also work. Committed in `985a100`.
-- [ ] M2 — SQLite persistence + conversation memory
+- [x] **M2 — SQLite persistence + conversation memory.** Done and verified live: told the bot a fact, killed and restarted the process (fresh Node process, zero in-memory state), asked it to recall the fact — it answered correctly, sourced entirely from `contextBuilder()` reading SQLite. 3 unit tests cover `buildContext()` (empty history, chronological ordering, 25-turn cap).
 - [ ] M3 — Scheduler/cron + watchdog
 - [ ] M4 — Autonomous task runner
 - [ ] M5 — Safety/confirmation rails
