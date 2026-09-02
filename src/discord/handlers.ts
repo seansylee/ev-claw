@@ -2,6 +2,7 @@ import type { Client, Message } from "discord.js";
 import { config } from "../config.js";
 import { runTurn } from "../agent/brain.js";
 import { chunkForDiscord } from "./client.js";
+import { interactiveLane } from "../scheduler/queue.js";
 
 export function registerHandlers(client: Client): void {
   client.once("clientReady", (readyClient) => {
@@ -9,7 +10,9 @@ export function registerHandlers(client: Client): void {
   });
 
   client.on("messageCreate", (message: Message) => {
-    void handleMessage(message);
+    // Routed through the interactive lane so concurrent/rapid-fire DMs are
+    // handled one at a time, never racing each other's DB writes or replies.
+    interactiveLane.enqueue(() => handleMessage(message));
   });
 
   client.on("error", (err) => {

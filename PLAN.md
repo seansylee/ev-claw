@@ -4,7 +4,7 @@
 
 - [x] **M1 — Basic Discord echo + single-turn SDK reply.** Done and verified live: bot connects, DMs work, and (extended slightly beyond the original M1 scope) `@mentions` in a shared server channel also work. Committed in `985a100`.
 - [x] **M2 — SQLite persistence + conversation memory.** Done and verified live: told the bot a fact, killed and restarted the process (fresh Node process, zero in-memory state), asked it to recall the fact — it answered correctly, sourced entirely from `contextBuilder()` reading SQLite. 3 unit tests cover `buildContext()` (empty history, chronological ordering, 25-turn cap).
-- [ ] M3 — Scheduler/cron + watchdog
+- [x] **M3 — Scheduler/cron + watchdog.** Done and verified live: a 1-minute interval watchdog job pointed at an unreachable URL fired, logged a `job_runs` failure row, and DMed a real LLM-composed alert. Found and fixed a real bug during live testing: the first version alerted on *every* failed tick (48 duplicate DMs over ~95 min in one test run) — fixed by only alerting on a state transition (healthy→failing, failing→recovered), verified by re-running 3 consecutive failures and confirming exactly one alert. 11 new unit tests (`computeNextRunAt`, the two-lane queue's serialization/error-isolation/independence, and the transition-alert decision logic in isolation, deliberately not mocking the live LLM/Discord calls per the plan's testing philosophy).
 - [ ] M4 — Autonomous task runner
 - [ ] M5 — Safety/confirmation rails
 - [ ] M6 — launchd background service
@@ -12,6 +12,9 @@
 **Deviations from the plan below, discovered during implementation:**
 - `better-sqlite3` failed to compile against this machine's Node version (v26.8.1 — no prebuilt binary, native build breaks against its updated V8 API). Switched to Node's built-in `node:sqlite` module instead (zero native compilation). This only affects the DB layer (M2+); the schema design is unchanged.
 - Discord replies aren't DM-only as originally scoped — it also responds to `@mentions` in server text channels, per a later request. DMs still respond to everything; channel messages require an explicit mention so it doesn't reply to unrelated chatter.
+- Watchdog alerting isn't "alert on every failure" as originally scoped — live testing surfaced that this spams the owner (48 duplicate DMs in ~95 minutes during one test). Fixed to alert only on a state transition (healthy→failing, failing→recovered); see `scheduler/watchdogAlert.ts`.
+- `schedule_type: 'cron'` isn't implemented yet — only `'interval'` jobs work for now (`scheduler/schedule.ts` throws a clear error for `'cron'`). Real cron-string parsing (e.g. via the `cron-parser` package) is deferred until an actual need for it shows up, per YAGNI; M3's watchdog/prompt use cases only needed interval scheduling.
+- No chat-driven way to create scheduled jobs yet (that's part of M4/M5's custom tools) — `scripts/add-job.ts` is a stopgap CLI for creating `scheduled_jobs` rows directly.
 
 ---
 
@@ -103,30 +106,42 @@ Native to macOS, no extra always-running supervisor to maintain, restarts on cra
 
 ```
 ev-claw/
-  package.json, tsconfig.json, .env.example, .gitignore, PLAN.md
+  package.json, tsconfig.json, tsconfig.build.json, .env.example, .gitignore, PLAN.md
   src/
-    index.ts                  # boot: discord client + handlers (scheduler/db wiring lands in M2+)
+    index.ts                  # boot: db, discord client + handlers + notify, cron loop
     config.ts                 # env loading + validation
-    agent/brain.ts             # runTurn(): query() call (buildContext()/persistence land in M2)
-    discord/client.ts          # Discord client factory + message chunking
-    discord/handlers.ts        # owner-only auth, DM + @mention routing
+    agent/
+      brain.ts                 # runTurn(): buildContext() + query() + persist
+      contextBuilder.ts
+    db/
+      client.ts, migrations/0001_init.sql
+      repositories/{messages,scheduledJobs,jobRuns}.ts
+    discord/
+      client.ts, handlers.ts    # owner-only auth, DM + @mention routing, routed through interactiveLane
+      notify.ts                 # notifyOwner() — proactive DMs from background jobs
+    scheduler/
+      queue.ts                  # two-lane FIFO worker (interactive / background)
+      cron.ts                   # tick loop over scheduled_jobs
+      schedule.ts                # computeNextRunAt() — interval only so far, see Deviations
+      watchdog.ts                # pure watchdog checks (url_reachability)
+      watchdogAlert.ts            # state-transition alert decision (no-spam logic)
+      runner.ts                  # dispatches a due job by job_type
     # not yet built (see Status above):
-    db/client.ts, db/migrations/0001_init.sql, db/repositories/*.ts
-    agent/contextBuilder.ts
     agent/permissions.ts       # canUseTool + auto-safe classification + hard deny rules
     agent/tools/{index,taskTools,memoryTools,scheduleTools,notifyTools}.ts
     discord/confirm.ts
-    scheduler/queue.ts, scheduler/cron.ts, scheduler/watchdog.ts
     taskRunner/runner.ts
-  scripts/launchd/com.seanlee.ev-claw.plist.example
+  scripts/
+    add-job.ts                  # stopgap CLI for creating scheduled_jobs rows (until M4/M5's schedule_job tool)
+    launchd/com.seanlee.ev-claw.plist.example
   data/                          # sqlite file (gitignored)
 ```
 
 ## Build order & verification
 
 1. **Basic Discord echo + single-turn SDK reply** (no tools, no DB). Verify: DM "hello" gets a coherent reply; non-owner messages are silently ignored; restart is clean. ✅ **Done.**
-2. **SQLite persistence + conversation memory**. Verify: restart mid-conversation, confirm it recalls prior turns from DB. Unit test `contextBuilder()` against seeded fake rows.
-3. **Scheduler/cron + one real watchdog** (e.g. URL reachability). Verify: a 1-minute test job fires, logs a `job_runs` row, DMs on simulated failure. Unit test due-job calculation with fake timers.
+2. **SQLite persistence + conversation memory**. Verify: restart mid-conversation, confirm it recalls prior turns from DB. Unit test `contextBuilder()` against seeded fake rows. ✅ **Done.**
+3. **Scheduler/cron + one real watchdog** (e.g. URL reachability). Verify: a 1-minute test job fires, logs a `job_runs` row, DMs on simulated failure. Unit test due-job calculation with fake timers. ✅ **Done** (see Status above for the alert-dedup fix found during verification).
 4. **Autonomous task runner** as its own scheduled job. Verify: add a task via chat, let the runner advance it, confirm status transitions; confirm the background lane prevents double-processing.
 5. **Safety/confirmation rails**. Verify: trigger an out-of-allowlist Bash command, see Approve/Deny buttons; test approve, deny, and timeout-auto-deny paths; kill the process mid-pending-confirmation and confirm it's marked `expired` on restart.
 6. **launchd background service**. Verify: reboot/re-login reconnects automatically; `kill -9` the process and confirm launchd relaunches within seconds; logs land correctly; `launchctl list` shows healthy status.
